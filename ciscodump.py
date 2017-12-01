@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python -u
 
 from secret import *
 import logging
@@ -10,6 +10,7 @@ import argparse
 import pprint
 import csv
 import sys
+import socket
 from dns import resolver,reversename
 from jinja2 import Environment, PackageLoader #@UnresolvedImport
 
@@ -39,7 +40,7 @@ from jinja2 import Environment, PackageLoader #@UnresolvedImport
 # Version 1.6 (23-9-2016)
 # Iets meer en netter debug informatie
 # Aangepast dat ook user niet in priviliged mode # het script kunnen gebruiken
-# Aanpasing template nu __file__ in de functie aanroep (niet getest)
+# Aanpasing template nu __name__ in de functie aanroep
 
 # Version 1.x (x-4-2015)
 # TODO Move output from test to interface dir
@@ -49,22 +50,18 @@ from jinja2 import Environment, PackageLoader #@UnresolvedImport
 
 version = "1.6 (23-11-2015) door Paul Boot"
 prog = __name__
-debug = True
+debug = False    # Do not set to true,  will be reassigned by command line argument --debug
 
 csvpath = '/opt/ciscodump/csv'
-targetsfile = 'targets-dev.csv'
+targetsfile = 'targets.csv'
 
 templatepath = '../templates/'
 templatefile = 'ciscodump-index.html'
 templateexportfile = 'export-index.html'
 
-htmlpath = '/var/www/html/test'
+htmlpath = '/var/www/html/rapport'
 htmlexportpath = '/var/www/html/export'
 htmlfile = 'interface-laatste.html'
-
-#Hack, read arp tables from these routers
-#routers = ['10.255.255.254', '192.168.254.254']
-routers = ['10.255.255.254']
 
 ifindex = {}
 interfaces = {}
@@ -76,14 +73,15 @@ ip2mac = {}
 mac2ip = {}
 
 log = logging.getLogger(__name__)
-logging.basicConfig(format='%(asctime)s %(message)s', datefmt='%m/%d/%Y %I:%M:%S %p', level=logging.DEBUG)
+logging.basicConfig(format='%(asctime)s %(message)s', datefmt='%m/%d/%Y %I:%M:%S %p', level=logging.INFO)
 log.info('Start logging')
 
 # Filtering
 ansi_escape = re.compile(r'\x1B\[[^A-Za-z]*[A-Za-z]')
 
-if debug:
-    paramiko.common.logging.basicConfig(level=paramiko.common.DEBUG)
+#if debug:
+#    paramiko.common.logging.basicConfig(level=paramiko.common.DEBUG)
+#logging.getLogger("paramiko").setLevel(logging.WARNING)
 
 # References
 # Google paramiko cisco example
@@ -104,7 +102,7 @@ def disable_paging(remote_conn):
     '''Disable paging on a Cisco router'''
 
     remote_conn.send("term len 0\n")
-    time.sleep(1)
+    time.sleep(.1)
     output = remote_conn.recv(1000)
     
     if debug:
@@ -116,7 +114,7 @@ def exit_switch(remote_conn):
     '''Exits Cisco switch'''
 
     remote_conn.send("exit\n")
-    time.sleep(1)
+    time.sleep(3)
     output = remote_conn.recv(1000)
     if debug:
         print output
@@ -124,12 +122,13 @@ def exit_switch(remote_conn):
     return output
 
 def get_interface_indexes(remote_conn):
-    '''Get interface indexes'''
+    '''
+    Get interface indexes
+    
+    send("show snmp mib ifmib ifindex detail\n")
+    
+    '''
 
-    global ifindex
-    
-    #boolean status
-    
     #Get interfaces indexes
     #Cat4500
     #show snmp mib ifmib ifindex detail
@@ -151,14 +150,12 @@ def get_interface_indexes(remote_conn):
     #GigabitEthernet1/0/39            41     yes      enabled       yes
     #GigabitEthernet1/1/4             54     yes      enabled       yes
 
-
     remote_conn.send("show snmp mib ifmib ifindex detail\n")
 
     buff = ''
-    while not buff.endswith('>') and not buff.endswith('#'):
-        if debug:
-            print "show snmp mib ifmib ifindex detail: while loop fetching until > or #"
-        time.sleep(1)
+    while not buff.endswith('>'):
+        log.debug('show snmp mib ifmib ifindex detail: while loop fetching until >')
+        time.sleep(.05)
         output = remote_conn.recv(16384)
         if debug:
             print ansi_escape.sub('', output)
@@ -167,8 +164,8 @@ def get_interface_indexes(remote_conn):
 
     lines = buff.splitlines()
     for line in lines:
-        #print line
-        #searchObj = re.search( r'(\S{3,8})\s{2,3}(.{18})\s{1}(\S+)\s{2,4}(\S{1,8})\s{2,12}(\S+)\s+(\S+)\s(.+$)', line, re.M|re.I)
+        if debug:
+            print line
         searchObj = re.search( r'(GigabitEthernet|TenGigabitEthernet)(\S{3,6})\s+(\S{1,4})', line, re.M|re.I)
         if searchObj:
             if searchObj.group(1) == 'GigabitEthernet':
@@ -182,25 +179,265 @@ def get_interface_indexes(remote_conn):
             ifindexkey = (targets[keytargets]['ser'] + '-' + targets[keytargets]['kast'], interface)
             ifindex[ifindexkey] = value
 
-    #print '-----show snmp mib ifmib ifindex detail--------'
-    #print ifindex
-    #pp = pprint.PrettyPrinter(indent=4)
-    #pp.pprint(ifindex)
-    #sys.exit()
+    if debug:
+        print '-----show snmp mib ifmib ifindex detail--------'
+        pp = pprint.PrettyPrinter(indent=4)
+        pp.pprint(ifindex)
     
+    #Option not used, you could read an outlet file (csv from excel sheet) to generate more reports
     #Now we know the indexes we can match the outlets if file exists for that gebouw
-    outletsfile = csvpath + '/' + keytargets[1] + '.csv'
-    if os.path.isfile(outletsfile):
-        print 'Outletsfile gevonden %s' % outletsfile 
-        read_csv_outlets(keytargets[1], outletsfile)
-    else:
-        print 'Outletsfile niet gevonden: %s' % outletsfile 
-    #pp = pprint.PrettyPrinter(indent=4)
-    #pp.pprint(outlets)
-    #sys.exit()
+    #outletsfile = csvpath + '/' + keytargets[1] + '.csv'
+    #if os.path.isfile(outletsfile):
+    #    print 'Outletsfile gevonden %s' % outletsfile 
+    #    read_csv_outlets(keytargets[1], outletsfile)
+    #else:
+    #    print 'Outletsfile niet gevonden: %s' % outletsfile 
 
-    return status
+    #if debug:
+    #    print '----dump outlets details -----'
+    #    pp = pprint.PrettyPrinter(indent=4)
+    #    pp.pprint(outlets)
+
+def get_interface_status(remote_conn):
+    '''
+    Get interface indexes
     
+    send("show interface status\n")
+    
+    '''
+ 
+    # Send the router a command
+    ###############################
+    #show interface status
+    #Port      Name               Status       Vlan       Duplex  Speed Type
+    #Fa1/0/1                      notconnect   1500         auto   auto 10/100BaseTX
+    #Fa1/0/24                     notconnect   1500         auto   auto 10/100BaseTX
+    #Gi1/0/1   => SWC-DEL-R-3B-25 connected    trunk      a-full a-1000 1000BaseLX SFP
+    #Fa3/0/24  Pink Roccade Healt connected    810        a-full  a-100 10/100BaseTX
+    #Gi3/0/1                      notconnect   1            auto   auto Not Present
+    #Gi3/0/2                      notconnect   1            auto   auto Not Present
+    #Gi1/10                       connected    2500       a-full  a-100 10/100/1000-TX
+    #Gi1/11                       connected    2514       a-full  a-100 10/100/1000-TX
+    #Port      Name               Status       Vlan       Duplex  Speed Type
+    #Te1/1     => SWC-DEL-R-3A-25 connected    trunk        full    10G 10GBase-LRM
+    #Te1/2     => SWC-DEL-R-3A-25 connected    trunk        full    10G 10GBase-LRM
+    #Gi1/48    Pink Roccade Healt connected    810        a-full  a-100 10/100/1000-TX
+
+    remote_conn.send("show interface status\n")
+
+    buff = ''
+    while not buff.endswith('>'):
+        if debug:
+            print "show interface status: while loop fetching until >"
+        time.sleep(.05)
+        output = remote_conn.recv(16384)
+        if debug:
+            print ansi_escape.sub('', output)
+        buff += output
+        buff = ansi_escape.sub('', buff)
+
+    lines = buff.splitlines()
+    for line in lines:
+        if debug:
+            print line
+        #searchObj = re.search( r'(\S{3,8})\s{2,3}(.{18})\s{1}(\S+)\s{2,4}(\S{1,8})\s{2,12}(\S+)\s+(\S+)\s(.+$)', line, re.M|re.I)
+        searchObj = re.search( r'(Gi|Te)(\S{3,6})\s{2,5}(.{18})\s{1}(\S+)\s+(\S{1,5})\s+(\S+)\s+(\S+)\s(.+$)', line, re.M|re.I)
+        if searchObj:
+            interface = searchObj.group(1) + searchObj.group(2)
+            description = searchObj.group(3)
+            status = searchObj.group(4)
+            vlan = searchObj.group(5)
+            duplex = searchObj.group(6)
+            speed = searchObj.group(7)
+            type = searchObj.group(8)
+
+            ifindexkey = ( targets[keytargets]['ser'] + '-' + targets[keytargets]['kast'], interface)
+            key = (keytargets[1], targets[keytargets]['ser'] + '-' + targets[keytargets]['kast'], ifindex[ifindexkey])
+            interfaces[key] = {}
+            interfaces[key]['interface'] = interface
+            interfaces[key]['switch'] = keytargets[2]
+            interfaces[key]['description'] = description
+            interfaces[key]['status'] = status
+            interfaces[key]['vlan'] = vlan
+            interfaces[key]['duplex'] = duplex
+            interfaces[key]['speed'] = speed
+            interfaces[key]['type'] = type
+            
+            if outlets.has_key(key):
+                interfaces[key]['outlet'] = outlets[key]['outlet']
+                interfaces[key]['ruimte'] = outlets[key]['ruimte']
+                interfaces[key]['toepassing'] = outlets[key]['toepassing']
+
+    if debug:
+        print '-----show interface status--------'
+        pp = pprint.PrettyPrinter(indent=4)
+        pp.pprint(interfaces)
+
+ 
+def get_mac_table(remote_conn):
+    '''
+    Get mac address table
+    
+    send("show mac address-table\n")
+    
+    '''
+
+    ###############################
+    #show mac address-table
+    
+    #Cat3750
+    #          Mac Address Table
+    #-------------------------------------------
+    #
+    #Vlan    Mac Address       Type        Ports
+    #----    -----------       --------    -----
+    # All    ffff.ffff.ffff    STATIC      CPU
+    # 121    8887.1780.a28a    STATIC      Fa3/0/20
+    #1500    000a.8302.0038    STATIC      Fa2/0/12
+    
+    #Cat4500
+    # vlan     mac address     type        protocols               port
+    #---------+---------------+--------+---------------------+-------------------------
+    # 121      8887.1780.a28a    static ip,ipx,assigned,other GigabitEthernet2/7     
+    #1101      7446.a0a0.4b26    static ip,ipx,assigned,other GigabitEthernet2/2
+    
+    #Cat3850
+    # Vlan    Mac Address       Type        Ports
+    # ----    -----------       --------    -----
+    #  All    0100.0ccc.cccc    STATIC      CPU
+    # 3255    ccd8.c130.2cd4    STATIC      Vl3255
+    # 1133    0023.2400.6d74    STATIC      Gi1/0/2
+    # 1133    3cd9.2b4d.3af5    STATIC      Gi1/0/1
+    # 1233    001a.e86f.1c53    STATIC      Gi2/0/48
+
+    remote_conn.send("show mac address-table\n")
+
+    buff = ''
+    while not buff.endswith('>'):
+        if debug:
+            print "show mac address-table: while loop fetching until >"
+        time.sleep(.05)
+        output = remote_conn.recv(16384)
+        if debug:
+            print ansi_escape.sub('', output)
+        buff += output
+        buff = ansi_escape.sub('', buff)
+
+    lines = buff.splitlines()
+    for line in lines:
+        if debug:
+            print line
+        #Cat3750
+        searchObj = re.search( r'\s{0,3}([0-9]{1,4})\s{4}([a-f0-9]{4}\.[a-f0-9]{4}\.[a-f0-9]{4})\s{4}(static|dynamic)\s{6}(\S{3,8})', line, re.M|re.I)
+        #Cat3850 oR 4500
+        searchObj = re.search( r'\s*([0-9]{1,4})\s+([a-f0-9]{4}\.[a-f0-9]{4}\.[a-f0-9]{4})\s+(static|dynamic)\s+(Gi|ip,ipx,assigned,other GigabitEthernet)(\S+)', line, re.M|re.I)
+        if searchObj:
+            vlan = searchObj.group(1)
+            mac = searchObj.group(2)
+            mactype = searchObj.group(3).lower()
+            interface = 'Gi' + searchObj.group(5)
+            #print 'vlan:%s  mac:%s  type:%s  interface:%s'  %  (vlan, mac, type, interface)
+            
+            if interface in targets[keytargets]['uplink']:
+                log.debug('Gevonden uplink interface:%s overslaan MAC entry' % interface)
+                continue
+            
+            ifindexkey = (targets[keytargets]['ser'] + '-' + targets[keytargets]['kast'], interface)
+            #key = (building, device, interface)
+            key = (keytargets[1], targets[keytargets]['ser'] + '-' + targets[keytargets]['kast'], ifindex[ifindexkey])
+            #interfaces[key] = {}
+            if interfaces[key].has_key('mac'):
+                #print 'heeft mac toevoegen'
+                interfaces[key]['mac'].append(mac + ' (' + vlan + ')')
+            else:
+                #print 'heeft geen mac maken en toevoegen'
+                interfaces[key]['mac'] = []
+                interfaces[key]['mac'].append(mac + ' (' + vlan + ')')
+            
+            #Add IP entry if found in ARP table
+            if mac2ip.has_key(mac):
+                if not interfaces[key].has_key('ip'):
+                    interfaces[key]['ip'] = []
+                interfaces[key]['ip'].append(mac2ip[mac]['ip'])
+                if mac2ip[mac].has_key('hostname'):
+                    if not interfaces[key].has_key('hostname'):
+                        interfaces[key]['hostname'] = []
+                    interfaces[key]['hostname'].append(mac2ip[mac]['hostname'])
+                mac2ip[mac]['gebouw'] = keytargets[1]
+                mac2ip[mac]['device'] = targets[keytargets]['ser'] + '-' + targets[keytargets]['kast']
+                mac2ip[mac]['interface'] = interface
+
+    if debug:
+        print '-----show mac address-table static--------'
+        pp = pprint.PrettyPrinter(indent=4)
+        pp.pprint(interfaces)
+    
+def get_auth_sessions(remote_conn):
+    '''
+    Get authenticated sessions
+    
+    send("show authentication sessions\n")
+    
+    '''
+    
+    #show authentication sessions
+    #Cat3750
+    #Interface  MAC Address     Method   Domain   Status         Session ID
+    #Fa3/0/17   (unknown)       mab      UNKNOWN  Running        0A14FF0A0000091F4D272780
+    #Fa3/0/13   (unknown)       mab      UNKNOWN  Running        0A14FF0A0000092F4D7F3E2D
+    #Fa3/0/19   (unknown)       mab      UNKNOWN  Running        0A14FF0A000009444DA5C6FB
+    #Fa3/0/16   (unknown)       mab      UNKNOWN  Running        0A14FF0A0000095D4E68BC83
+    #Fa3/0/8    0001.3e34.5a5c  mab      DATA     Authz Success  0A14FF0A0000093F4D807296
+    #Fa2/0/48   001a.e86f.155d  mab      VOICE    Authz Success  0A14FF0A0000068B1A886C4C
+    #Fa3/0/15   9890.96bc.abfa  mab      DATA     Authz Success  0A14FF0A000008C4473ACC78
+    #Fa2/0/30   001c.ab45.2ff6  mab      DATA     Authz Failed   0A14FF0A000008C04730CA36
+    
+    #Cat4500
+    #Interface    MAC Address    Method  Domain  Status Fg Session ID
+    #Gi2/45       000c.ab28.4ae7 mab     DATA    Auth      0A14FF010000079B37BA9C98
+    #Gi2/7        8887.1780.a28a mab     DATA    Auth      0A14FF010000083A38D68874
+    #Gi2/18       001f.5517.55cd mab     DATA    Auth      0A14FF01000007C537C83904
+    #Gi3/39       000f.1100.39e6 mab     DATA    Unauth    0A14FF4700002E3D6F085E84
+
+    remote_conn.send("show authentication sessions\n")
+
+    buff = ''
+    while not buff.endswith('>'):
+        log.debug('show authentication sessions: while loop fetching until >')
+        time.sleep(.05)
+        output = remote_conn.recv(16384)
+        if debug:
+            print ansi_escape.sub('', output)
+        buff += output
+        buff = ansi_escape.sub('', buff)
+
+    lines = buff.splitlines()
+    for line in lines:
+        if debug:
+            print line
+        #TODO Status kolom NIET GOED waarde Auth Unauth
+        searchObj = re.search( r'(\S+)\s+(\(unknown\)|[a-f0-9]{4}\.[a-f0-9]{4}\.[a-f0-9]{4})\s+(\S+)\s+(\S+)\s+(\S+)', line, re.M|re.I)
+        if searchObj:
+            interface = searchObj.group(1)
+            isemac = searchObj.group(2)
+            method = searchObj.group(3)
+            domain = searchObj.group(4)
+            status = searchObj.group(5)
+
+            ifindexkey = (targets[keytargets]['ser'] + '-' + targets[keytargets]['kast'], interface)
+            #key = (building, device, interface)
+            key = (keytargets[1], targets[keytargets]['ser'] + '-' + targets[keytargets]['kast'], ifindex[ifindexkey])
+            if interfaces[key].has_key('isemac'):
+                interfaces[key]['isemac'].append(isemac + ' (' + domain + ')')
+            else:
+                interfaces[key]['isemac'] = []
+                interfaces[key]['isemac'].append(isemac + ' (' + domain + ')')
+    
+    if debug:
+        print '-----show authentication sessions--------'
+        pp = pprint.PrettyPrinter(indent=4)
+        pp.pprint(interfaces)
+
     
 def read_csv_outlets(gebouw, filename):
 
@@ -276,7 +513,7 @@ def read_csv_targets(filename):
 
 def read_arp_tabels(routers):
     
-    global ip2mac, mac2ip
+    log.info('Start routine read_arp_tabels(routers) including losts of DNS lookups(slow)')
     
     # Create instance of SSHClient object
     remote_conn_pre = paramiko.SSHClient()
@@ -290,22 +527,22 @@ def read_arp_tabels(routers):
         #remote_conn_pre.connect(hostname, username=username, password=password)
         remote_conn_pre.connect(router, username=readonlyusername, password=readonlypassword, allow_agent=False, look_for_keys=False)
 
-        print "SSH connection established to %s" % router
+        log.info('SSH connection established to %s' % router)
 
         # Use invoke_shell to establish an 'interactive session'
         remote_conn = remote_conn_pre.invoke_shell(term='dumb')
-        print "Interactive SSH session established"
+        log.info('SSH interactive session waiting')
 
         # Strip the initial router prompt
         buff = ''
-        while not buff.endswith('>') and not buff.endswith('#'):
+        while not buff.endswith('>'):
             if debug:
-                print "Initial login: while loop fetching until > or #"
-            time.sleep(1)
+                print "Initial login: while loop fetching until >"
+            time.sleep(.1)
             output = remote_conn.recv(16384)
             buff += output
             buff = ansi_escape.sub('', buff)
-            
+        
         # Turn off paging
         disable_paging(remote_conn)
 
@@ -318,17 +555,21 @@ def read_arp_tabels(routers):
         remote_conn.send("show ip arp\n")
         
         buff = ''
-        while not buff.endswith('>') and not buff.endswith('#'):
+        while not buff.endswith('>'):
             if debug:
-                print "show ip arp: while loop fetching until > or #"
-            time.sleep(1)
+                print "show ip arp: while loop fetching until >"
+            time.sleep(.05)
             output = remote_conn.recv(16384)
             buff += output
             buff = ansi_escape.sub('', buff)
 
+        #Close connection we are done
+        exit_switch(remote_conn)
+        remote_conn_pre.close()
+        
+        #Parse output
         lines = buff.splitlines()
         for line in lines:
-            #print line
             searchObj = re.search( r'Internet\s+([0-9.]{7,15})\s+(\S+)\s+([a-f0-9]{4}\.[a-f0-9]{4}\.[a-f0-9]{4})\s+ARPA\s+Vlan([0-9]{1,4})', line, re.M|re.I)
             if searchObj:
                 ip = searchObj.group(1)
@@ -351,23 +592,27 @@ def read_arp_tabels(routers):
                 addr=reversename.from_address(ip)
                 try:
                     (hostname, domain) = str(resolver.query(addr,"PTR")[0]).split('.', 1)
-                    #print 'Found host %s for %s' % (hostname, ip)
+                    if debug:
+                        print 'Found host %s for %s' % (hostname, ip)
                     ip2mac[ip]['hostname'] = hostname
                     mac2ip[mac]['hostname'] = hostname
                 except resolver.NXDOMAIN:
-                    #print 'resolver.NXDOMAIN in resolver.query for %s' % ip
+                    if debug:
+                        print 'resolver.NXDOMAIN in resolver.query for %s' % ip
                     pass
                 except resolver.NoAnswer:
-                    #print 'resolver.NoAnswer in resolver.query for %s' % ip
+                    if debug:
+                        print 'resolver.NoAnswer in resolver.query for %s' % ip
                     pass            
 
-        #print '-----show ip arp--------'
-        #pp = pprint.PrettyPrinter(indent=4)
-        #pp.pprint(ip2mac)
-        #pp.pprint(mac2ip)
+        if debug:
+            print '-----show ip arp, print ip2mac--------'
+            pp = pprint.PrettyPrinter(indent=4)
+            pp.pprint(ip2mac)
+            print '-----show ip arp, print mac2ip--------'
+            pp.pprint(mac2ip)
         
-        exit_switch(remote_conn)
-        remote_conn_pre.close()
+        log.info('Done routine read_arp_tabels(routers)')
 
 
 def generate_html(plaatsen, gebouwen, targets, interfaces, ip2mac):
@@ -382,21 +627,24 @@ def generate_html(plaatsen, gebouwen, targets, interfaces, ip2mac):
     
     for plaats in plaatsen:
         for gebouw in gebouwen[plaats]:
-            log.info('Start generating HTML in generate_html')
-            #env = Environment(loader=PackageLoader('ciscodump', templatepath))
-            env = Environment(loader=PackageLoader(__file__, templatepath))
-            template = env.get_template(templatefile)
- 
+        
+            log.info('Start generating files in generate_html')
+            env = Environment(loader=PackageLoader(__name__, templatepath))
+
+            #HTML rapporten, uitgezet wordt niet gebruikt, code werkt wel   
+            #template = env.get_template(templatefile)            
+
             #mkdir plaats
-            if not os.path.exists(htmlpath + '/' + plaats):
-                os.makedirs(htmlpath + '/' + plaats)
+            #if not os.path.exists(htmlpath + '/' + plaats):
+            #    os.makedirs(htmlpath + '/' + plaats)
             #mkdir gebouw
-            if not os.path.exists(htmlpath + '/' + plaats + '/' + gebouw):
-                os.makedirs(htmlpath + '/' + plaats + '/' + gebouw)
+            #if not os.path.exists(htmlpath + '/' + plaats + '/' + gebouw):
+            #    os.makedirs(htmlpath + '/' + plaats + '/' + gebouw)
             
-            file = open(htmlpath + '/' + plaats + '/' + gebouw + '/' + htmlfile, 'w')
-            file.write(template.render({'plaats' : plaats, 'gebouw' : gebouw, 'targets' : targets, 'interfaces' : interfaces, 'ip2mac' : ip2mac}))
-            file.close()
+            #log.info('Start generating pretty HTML reports')
+            #file = open(htmlpath + '/' + plaats + '/' + gebouw + '/' + htmlfile, 'w')
+            #file.write(template.render({'plaats' : plaats, 'gebouw' : gebouw, 'targets' : targets, 'interfaces' : interfaces, 'ip2mac' : ip2mac}))
+            #file.close()
 
             log.info('Start generating export file for Excel')
             template = env.get_template(templateexportfile)
@@ -404,25 +652,33 @@ def generate_html(plaatsen, gebouwen, targets, interfaces, ip2mac):
             file.write(template.render({'plaats' : plaats, 'gebouw' : gebouw, 'targets' : targets, 'interfaces' : interfaces, 'ip2mac' : ip2mac}))
             file.close()
 
-            log.info('Done generating HTML in generate_html')
+            log.info('Done generating files in generate_html')
     
     return 
 
 
 if __name__ == '__main__':
 
+    log.info('Start main')
+    
     args = parseargs()
     debug = args.debug
+    if debug:
+        logging.basicConfig(level=logging.DEBUG)
 
-	#SKIP
-    #read_arp_tabels(routers)
-    #sys.exit()
-    
+    #Lees in de switches (targets die we gaan uitlezen)
     read_csv_targets(csvpath + '/' + targetsfile)
-    pp = pprint.PrettyPrinter(indent=4)
-    pp.pprint(targets)
-    pp.pprint(plaatsen)
-    pp.pprint(gebouwen)
+    if debug:
+        pp = pprint.PrettyPrinter(indent=4)
+        print '###Targets###'
+        pp.pprint(targets)
+        print '###Plaatsen###'
+        pp.pprint(plaatsen)
+        print '###Gebouwen###'
+        pp.pprint(gebouwen)
+    
+	#Lees de arp tabellen in op de core
+    read_arp_tabels(routers)
     
     # Create instance of SSHClient object
     remote_conn_pre = paramiko.SSHClient()
@@ -434,22 +690,31 @@ if __name__ == '__main__':
     for keytargets in targets:
         # initiate SSH connection
         #remote_conn_pre.connect(hostname, username=username, password=password)
-        remote_conn_pre.connect(targets[keytargets]['ip'], username=readonlyusername, password=readonlypassword, allow_agent=False, look_for_keys=False)
+        log.info('############MAIN LOOP##################')
+        log.info('SSH connection trying %s' % keytargets[2])
 
-        print "SSH connection established to %s" % keytargets[2]
+        try:
+            remote_conn_pre.connect(targets[keytargets]['ip'], username=readonlyusername, password=readonlypassword, allow_agent=False, look_for_keys=False)
+        except socket.error as e:
+            if e.errno == 110:
+                log.error('ERROR: SSH socket.error time out, continue to next device')
+                continue
+            else:
+                raise socket.error
+
+        log.info('SSH connection established to %s' % keytargets[2])
 
         # Use invoke_shell to establish an 'interactive session'
         remote_conn = remote_conn_pre.invoke_shell(term='dumb')
-        print "Interactive SSH session established"
+        log.info('SSH interactive session waiting')
 
         targets[keytargets]['laatstescan'] = time.strftime("%c")
         
-        # Strip the initial router prompt
         buff = ''
-        while not buff.endswith('>') and not buff.endswith('#'):
+        while not buff.endswith('>'):
             if debug:
-                print "Initial login: while loop fetching until > or #"
-            time.sleep(1)
+                print "Initial login: while loop fetching until >"
+            time.sleep(.1)
             output = remote_conn.recv(16384)
             if debug:
                 print ansi_escape.sub('', output)
@@ -459,310 +724,21 @@ if __name__ == '__main__':
         # Turn off paging
         disable_paging(remote_conn)
 
-        # Read interface indexes from devices
-        #get_interface_indexes(remote_conn)
+        # Read interface indexes from devices and outlet files
+        get_interface_indexes(remote_conn)
         
         # Read interface status from devices
-        #get_interface_status(remote_conn)
+        get_interface_status(remote_conn)
 
         # Read mac table from devices
-        #get_mac_table
-        #remote_conn.send("show mac address-table\n")
-
+        get_mac_table(remote_conn)
+        
         # Read authetnication sessions from devices
-        #get_auth_sessions
-        #remote_conn.send("show authentication sessions\n")
-        
-        #DOUBLE REMOVE      
-        #Get interfaces indexes
-        #Cat4500
-        #show snmp mib ifmib ifindex detail
-        #Description                     ifIndex  Active  Persistent  Saved
-        #-------------------------------------------------------------------------
-        #
-        #GigabitEthernet3/29              126    yes      enabled       yes
-        #GigabitEthernet4/20              165    yes      enabled       yes
-        #GigabitEthernet1/32              33     yes      enabled       yes
-        #GigabitEthernet7/48              245    yes      enabled       yes
-        #GigabitEthernet7/6               203    yes      enabled       yes
-        #TenGigabitEthernet3/1            98     yes      enabled       yes
-        #TenGigabitEthernet3/2            99     yes      enabled       yes
-        
-        #Cat3850
-        #Description                     ifIndex  Active  Persistent  Saved
-        #-------------------------------------------------------------------------
-        #
-        #GigabitEthernet1/0/39            41     yes      enabled       yes
-        #GigabitEthernet1/1/4             54     yes      enabled       yes
-
-        remote_conn.send("show snmp mib ifmib ifindex detail\n")
-
-        buff = ''
-        while not buff.endswith('>') and not buff.endswith('#'):
-            if debug:
-                print "show snmp mib ifmib ifindex detail: while loop fetching until > or #"
-            time.sleep(1)
-            output = remote_conn.recv(16384)
-            if debug:
-                print ansi_escape.sub('', output)
-            buff += output
-            buff = ansi_escape.sub('', buff)
-
-        lines = buff.splitlines()
-        for line in lines:
-            #print line
-            #searchObj = re.search( r'(\S{3,8})\s{2,3}(.{18})\s{1}(\S+)\s{2,4}(\S{1,8})\s{2,12}(\S+)\s+(\S+)\s(.+$)', line, re.M|re.I)
-            searchObj = re.search( r'(GigabitEthernet|TenGigabitEthernet)(\S{3,6})\s+(\S{1,4})', line, re.M|re.I)
-            if searchObj:
-                if searchObj.group(1) == 'GigabitEthernet':
-                    interface = 'Gi' + searchObj.group(2)
-                elif searchObj.group(1) == 'TenGigabitEthernet':
-                    interface = 'Te' + searchObj.group(2)
-                else:
-                    log.error('In show snmp mib ifmib could not find valid interface type')
-                
-                value = '%0*s' % (4, searchObj.group(3))
-                ifindexkey = (targets[keytargets]['ser'] + '-' + targets[keytargets]['kast'], interface)
-                ifindex[ifindexkey] = value
-
-        #print '-----show snmp mib ifmib ifindex detail--------'
-        #print ifindex
-        #pp = pprint.PrettyPrinter(indent=4)
-        #pp.pprint(ifindex)
-        #sys.exit()
-        
-        #Now we know the indexes we can match the outlets if file exists for that gebouw
-        outletsfile = csvpath + '/' + keytargets[1] + '.csv'
-        if os.path.isfile(outletsfile):
-            print 'Outletsfile gevonden %s' % outletsfile 
-            read_csv_outlets(keytargets[1], outletsfile)
-        else:
-            print 'Outletsfile niet gevonden: %s' % outletsfile 
-        #pp = pprint.PrettyPrinter(indent=4)
-        #pp.pprint(outlets)
-        #sys.exit()
-
-
-        # Send the router a command
-        ###############################
-        #show interface status
-        #Port      Name               Status       Vlan       Duplex  Speed Type
-        #Fa1/0/1                      notconnect   1500         auto   auto 10/100BaseTX
-        #Fa1/0/24                     notconnect   1500         auto   auto 10/100BaseTX
-        #Gi1/0/1   => SWC-DEL-R-3B-25 connected    trunk      a-full a-1000 1000BaseLX SFP
-        #Fa3/0/24  Pink Roccade Healt connected    810        a-full  a-100 10/100BaseTX
-        #Gi3/0/1                      notconnect   1            auto   auto Not Present
-        #Gi3/0/2                      notconnect   1            auto   auto Not Present
-        #Gi1/10                       connected    2500       a-full  a-100 10/100/1000-TX
-        #Gi1/11                       connected    2514       a-full  a-100 10/100/1000-TX
-        #Port      Name               Status       Vlan       Duplex  Speed Type
-        #Te1/1     => SWC-DEL-R-3A-25 connected    trunk        full    10G 10GBase-LRM
-        #Te1/2     => SWC-DEL-R-3A-25 connected    trunk        full    10G 10GBase-LRM
-        #Gi1/48    Pink Roccade Healt connected    810        a-full  a-100 10/100/1000-TX
-
-        remote_conn.send("show interface status\n")
-
-        buff = ''
-        while not buff.endswith('>') and not buff.endswith('#'):
-            if debug:
-                print "show interface status: while loop fetching until > or #"
-            time.sleep(1)
-            output = remote_conn.recv(16384)
-            if debug:
-                print ansi_escape.sub('', output)
-            buff += output
-            buff = ansi_escape.sub('', buff)
-
-        lines = buff.splitlines()
-        for line in lines:
-            #print line
-            #searchObj = re.search( r'(\S{3,8})\s{2,3}(.{18})\s{1}(\S+)\s{2,4}(\S{1,8})\s{2,12}(\S+)\s+(\S+)\s(.+$)', line, re.M|re.I)
-            searchObj = re.search( r'(Gi|Te)(\S{3,6})\s{2,5}(.{18})\s{1}(\S+)\s+(\S{1,5})\s+(\S+)\s+(\S+)\s(.+$)', line, re.M|re.I)
-            if searchObj:
-                interface = searchObj.group(1) + searchObj.group(2)
-                description = searchObj.group(3)
-                status = searchObj.group(4)
-                vlan = searchObj.group(5)
-                duplex = searchObj.group(6)
-                speed = searchObj.group(7)
-                type = searchObj.group(8)
-
-                ifindexkey = ( targets[keytargets]['ser'] + '-' + targets[keytargets]['kast'], interface)
-                key = (keytargets[1], targets[keytargets]['ser'] + '-' + targets[keytargets]['kast'], ifindex[ifindexkey])
-                interfaces[key] = {}
-                interfaces[key]['interface'] = interface
-                interfaces[key]['switch'] = keytargets[2]
-                interfaces[key]['description'] = description
-                interfaces[key]['status'] = status
-                interfaces[key]['vlan'] = vlan
-                interfaces[key]['duplex'] = duplex
-                interfaces[key]['speed'] = speed
-                interfaces[key]['type'] = type
-                
-                if outlets.has_key(key):
-                    interfaces[key]['outlet'] = outlets[key]['outlet']
-                    interfaces[key]['ruimte'] = outlets[key]['ruimte']
-                    interfaces[key]['toepassing'] = outlets[key]['toepassing']
-
-        #print '-----show interface status--------'
-        #print interfaces
-        #pp = pprint.PrettyPrinter(indent=4)
-        #pp.pprint(interfaces)
-        #sys.exit()
-
-        # Send the router a command
-        ###############################
-        #show mac address-table
-        
-        #Cat3750
-        #          Mac Address Table
-        #-------------------------------------------
-        #
-        #Vlan    Mac Address       Type        Ports
-        #----    -----------       --------    -----
-        # All    ffff.ffff.ffff    STATIC      CPU
-        # 121    8887.1780.a28a    STATIC      Fa3/0/20
-        #1500    000a.8302.0038    STATIC      Fa2/0/12
-        
-        #Cat4500
-        # vlan     mac address     type        protocols               port
-        #---------+---------------+--------+---------------------+-------------------------
-        # 121      8887.1780.a28a    static ip,ipx,assigned,other GigabitEthernet2/7     
-        #1101      7446.a0a0.4b26    static ip,ipx,assigned,other GigabitEthernet2/2
-        
-        #Cat3850
-        # Vlan    Mac Address       Type        Ports
-        # ----    -----------       --------    -----
-        #  All    0100.0ccc.cccc    STATIC      CPU
-        # 3255    ccd8.c130.2cd4    STATIC      Vl3255
-        # 1133    0023.2400.6d74    STATIC      Gi1/0/2
-        # 1133    3cd9.2b4d.3af5    STATIC      Gi1/0/1
-        # 1233    001a.e86f.1c53    STATIC      Gi2/0/48
-
-        remote_conn.send("show mac address-table\n")
-
-        buff = ''
-        while not buff.endswith('>') and not buff.endswith('#'):
-            if debug:
-                print "show mac address-table: while loop fetching until > or #"
-            time.sleep(1)
-            output = remote_conn.recv(16384)
-            if debug:
-                print ansi_escape.sub('', output)
-            buff += output
-            buff = ansi_escape.sub('', buff)
-
-        lines = buff.splitlines()
-        for line in lines:
-            #print line
-            
-            #Cat3750
-            searchObj = re.search( r'\s{0,3}([0-9]{1,4})\s{4}([a-f0-9]{4}\.[a-f0-9]{4}\.[a-f0-9]{4})\s{4}(static|dynamic)\s{6}(\S{3,8})', line, re.M|re.I)
-            #Cat3850 of 4500
-            searchObj = re.search( r'\s*([0-9]{1,4})\s+([a-f0-9]{4}\.[a-f0-9]{4}\.[a-f0-9]{4})\s+(static|dynamic)\s+(Gi|ip,ipx,assigned,other GigabitEthernet)(\S+)', line, re.M|re.I)
-            if searchObj:
-                vlan = searchObj.group(1)
-                mac = searchObj.group(2)
-                mactype = searchObj.group(3).lower()
-                interface = 'Gi' + searchObj.group(5)
-                #print 'vlan:%s  mac:%s  type:%s  interface:%s'  %  (vlan, mac, type, interface)
-                
-                if interface in targets[keytargets]['uplink']:
-                    #print 'Gevonden uplink interface:%s overslaan MAC entry' % interface
-                    continue
-                
-                ifindexkey = (targets[keytargets]['ser'] + '-' + targets[keytargets]['kast'], interface)
-                #key = (building, device, interface)
-                key = (keytargets[1], targets[keytargets]['ser'] + '-' + targets[keytargets]['kast'], ifindex[ifindexkey])
-                #interfaces[key] = {}
-                if interfaces[key].has_key('mac'):
-                    #print 'heeft mac toevoegen'
-                    interfaces[key]['mac'].append(mac + ' (' + vlan + ')')
-                else:
-                    #print 'heeft geen mac maken en toevoegen'
-                    interfaces[key]['mac'] = []
-                    interfaces[key]['mac'].append(mac + ' (' + vlan + ')')
-                
-                #Add IP entry if found in ARP table
-                if mac2ip.has_key(mac):
-                    if not interfaces[key].has_key('ip'):
-                        interfaces[key]['ip'] = []
-                    interfaces[key]['ip'].append(mac2ip[mac]['ip'])
-                    if mac2ip[mac].has_key('hostname'):
-                        if not interfaces[key].has_key('hostname'):
-                            interfaces[key]['hostname'] = []
-                        interfaces[key]['hostname'].append(mac2ip[mac]['hostname'])
-                    mac2ip[mac]['gebouw'] = keytargets[1]
-                    mac2ip[mac]['device'] = targets[keytargets]['ser'] + '-' + targets[keytargets]['kast']
-                    mac2ip[mac]['interface'] = interface
-
-        #print '-----show mac address-table static--------'
-        #pp = pprint.PrettyPrinter(indent=4)
-        #pp.pprint(interfaces)
-        
-        #show authentication sessions
-        #Cat3750
-        #Interface  MAC Address     Method   Domain   Status         Session ID
-        #Fa3/0/17   (unknown)       mab      UNKNOWN  Running        0A14FF0A0000091F4D272780
-        #Fa3/0/13   (unknown)       mab      UNKNOWN  Running        0A14FF0A0000092F4D7F3E2D
-        #Fa3/0/19   (unknown)       mab      UNKNOWN  Running        0A14FF0A000009444DA5C6FB
-        #Fa3/0/16   (unknown)       mab      UNKNOWN  Running        0A14FF0A0000095D4E68BC83
-        #Fa3/0/8    0001.3e34.5a5c  mab      DATA     Authz Success  0A14FF0A0000093F4D807296
-        #Fa2/0/48   001a.e86f.155d  mab      VOICE    Authz Success  0A14FF0A0000068B1A886C4C
-        #Fa3/0/15   9890.96bc.abfa  mab      DATA     Authz Success  0A14FF0A000008C4473ACC78
-        #Fa2/0/30   001c.ab45.2ff6  mab      DATA     Authz Failed   0A14FF0A000008C04730CA36
-        
-        #Cat4500
-        #Interface    MAC Address    Method  Domain  Status Fg Session ID
-        #Gi2/45       000c.ab28.4ae7 mab     DATA    Auth      0A14FF010000079B37BA9C98
-        #Gi2/7        8887.1780.a28a mab     DATA    Auth      0A14FF010000083A38D68874
-        #Gi2/18       001f.5517.55cd mab     DATA    Auth      0A14FF01000007C537C83904
-        #Gi3/39       000f.1100.39e6 mab     DATA    Unauth    0A14FF4700002E3D6F085E84
-
-        remote_conn.send("show authentication sessions\n")
-
-        buff = ''
-        while not buff.endswith('>') and not buff.endswith('#'):
-            if debug:
-                print "show authentication sessions: while loop fetching until > or #"
-            time.sleep(1)
-            output = remote_conn.recv(16384)
-            if debug:
-                print ansi_escape.sub('', output)
-            buff += output
-            buff = ansi_escape.sub('', buff)
-
-        lines = buff.splitlines()
-        for line in lines:
-            print line
-            #TODO Status kolom NIET GOED waarde Auth Unauth
-            searchObj = re.search( r'(\S+)\s+(\(unknown\)|[a-f0-9]{4}\.[a-f0-9]{4}\.[a-f0-9]{4})\s+(\S+)\s+(\S+)\s+(\S+)', line, re.M|re.I)
-            if searchObj:
-                interface = searchObj.group(1)
-                isemac = searchObj.group(2)
-                method = searchObj.group(3)
-                domain = searchObj.group(4)
-                status = searchObj.group(5)
-
-                ifindexkey = (targets[keytargets]['ser'] + '-' + targets[keytargets]['kast'], interface)
-                #key = (building, device, interface)
-                key = (keytargets[1], targets[keytargets]['ser'] + '-' + targets[keytargets]['kast'], ifindex[ifindexkey])
-                if interfaces[key].has_key('isemac'):
-                    interfaces[key]['isemac'].append(isemac + ' (' + domain + ')')
-                else:
-                    interfaces[key]['isemac'] = []
-                    interfaces[key]['isemac'].append(isemac + ' (' + domain + ')')
-        
-        #print '-----show authentication sessions--------'
-        #pp = pprint.PrettyPrinter(indent=4)
-        #pp.pprint(interfaces)
+        get_auth_sessions(remote_conn)
         
         exit_switch(remote_conn)
         remote_conn_pre.close()
-    
-    #pp = pprint.PrettyPrinter(indent=4)
-    #pp.pprint(targets)
-    
+   
     
     #Done collecting info start generating output
     generate_html(plaatsen, gebouwen, targets, interfaces, ip2mac)
